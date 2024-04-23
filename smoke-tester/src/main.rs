@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use linkme::distributed_slice;
 use miette::{Context, IntoDiagnostic, Result};
-use probe_rs::Permissions;
+use probe_rs::{architecture::arm::ArmError, Permissions};
 
 mod dut_definition;
 mod macros;
@@ -141,8 +141,16 @@ fn run_test(definitions: &[DutDefinition], markdown_summary: Option<PathBuf>) ->
 
             println_dut_status!(tracker, blue, "Halting core..");
 
-            core.reset_and_halt(Duration::from_millis(500))
-                .into_diagnostic()?;
+            // Get the return status from core.reset_and_halt and if its ArmError::ReAttachRequired take action
+            let mut timeout = Duration::from_millis(500);
+            let reset_result = core.reset_and_halt(timeout);
+
+            if let Err(probe_rs::Error::Arm(ArmError::ReAttachRequired)) = reset_result {
+                drop(core);
+                session.reattach().unwrap();
+                core = session.core(core_index).unwrap();
+                core.halt(timeout).unwrap();
+            }
 
             for test_fn in CORE_TESTS {
                 let result = tracker.run_test(|tracker| test_fn(tracker, &mut core));
@@ -153,11 +161,14 @@ fn run_test(definitions: &[DutDefinition], markdown_summary: Option<PathBuf>) ->
             }
 
             // Ensure core is not running anymore.
-            core.reset_and_halt(Duration::from_millis(200))
-                .into_diagnostic()
-                .wrap_err_with(|| {
-                    format!("Failed to reset core with index {core_index} after test")
-                })?;
+            timeout = Duration::from_millis(200);
+            let reset_result = core.reset_and_halt(timeout);
+            if let Err(probe_rs::Error::Arm(ArmError::ReAttachRequired)) = reset_result {
+                drop(core);
+                session.reattach().unwrap();
+                core = session.core(core_index).unwrap();
+                core.halt(timeout).unwrap();
+            }
         }
 
         for test in SESSION_TESTS {

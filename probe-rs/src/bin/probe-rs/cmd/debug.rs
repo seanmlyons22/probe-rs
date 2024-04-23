@@ -10,6 +10,7 @@ use capstone::{
 use num_traits::Num;
 use parse_int::parse;
 use probe_rs::architecture::arm::ap::AccessPortError;
+use probe_rs::architecture::arm::ArmError;
 use probe_rs::debug::stack_frame::StackFrameInfo;
 use probe_rs::exception_handler_for_core;
 use probe_rs::flashing::FileDownloadError;
@@ -17,6 +18,7 @@ use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeError;
 use probe_rs::CoreDumpError;
 use probe_rs::CoreInterface;
+use probe_rs::Error;
 use probe_rs::{
     debug::{debug_info::DebugInfo, registers::DebugRegisters, stack_frame::StackFrame},
     Core, CoreType, InstructionSet, MemoryInterface, RegisterValue,
@@ -42,14 +44,14 @@ impl Cmd {
     pub fn run(self, lister: &Lister) -> anyhow::Result<()> {
         let (mut session, _probe_options) = self.common.simple_attach(lister)?;
 
-        let di = self
+        let mut di = self
             .exe
             .as_ref()
             .and_then(|path| DebugInfo::from_file(path).ok());
 
         let cli = DebugCli::new();
 
-        let core = session.core(self.shared.core)?;
+        let mut core = session.core(self.shared.core)?;
 
         let mut cli_data = CliData::new(core, di)?;
 
@@ -67,6 +69,17 @@ impl Cmd {
 
                     match cli_state {
                         CliState::Continue => (),
+                        CliState::Reattach => {
+                            drop(cli_data);
+                            session.reattach()?;
+                            di = self
+                                .exe
+                                .as_ref()
+                                .and_then(|path| DebugInfo::from_file(path).ok());
+                            core = session.core(self.shared.core)?;
+                            cli_data = CliData::new(core, di)?;
+                            ()
+                        }
                         CliState::Stop => break,
                     }
                 }
@@ -285,7 +298,7 @@ impl DebugCli {
                                                 println!("-> configurable priority exception has been escalated to hard fault!");
 
 
-                                                // read cfsr 
+                                                // read cfsr
                                                 let cfsr = cli_data.core.read_word_32(0xE000_ED28)?;
 
                                                 let ufsr = (cfsr >> 16) & 0xffff;
@@ -852,7 +865,13 @@ impl DebugCli {
 
             function: |cli_data, _args| {
                 cli_data.core.halt(Duration::from_millis(100))?;
-                cli_data.core.reset_and_halt(Duration::from_millis(100))?;
+
+                // Convert ArmErr::ReAttachRequired to CliState::Reattach
+                if let Err(Error::Arm(ArmError::ReAttachRequired)) =
+                    cli_data.core.reset_and_halt(Duration::from_millis(100))
+                {
+                    return Ok(CliState::Reattach);
+                }
 
                 Ok(CliState::Continue)
             },
@@ -1086,6 +1105,7 @@ impl HaltedState {
 
 pub enum CliState {
     Continue,
+    Reattach,
     Stop,
 }
 

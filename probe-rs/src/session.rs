@@ -512,6 +512,37 @@ impl Session {
         Ok(interface)
     }
 
+    /// Reattach to a probe after it is disconnected
+    pub fn reattach(&mut self) -> Result<(), Error> {
+        match &self.interface {
+            ArchitectureInterface::Arm(_iface) => self.reattach_arm(),
+            ArchitectureInterface::Riscv(_iface) => Err(Error::NotImplemented(
+                "Reattach not yet implemented for Risv",
+            )),
+            ArchitectureInterface::Xtensa(_iface) => Err(Error::NotImplemented(
+                "Reattach not yet implemented for Xtensa",
+            )),
+        }
+    }
+
+    fn reattach_arm(&mut self) -> Result<(), Error> {
+        let ArchitectureInterface::Arm(ref mut interface) = self.interface else {
+            return Err(Error::Probe(DebugProbeError::NotImplemented {
+                function_name: "Debug Erase Sequence",
+            }));
+        };
+
+        let DebugSequence::Arm(ref debug_sequence) = self.target.debug_sequence else {
+            unreachable!("This should never happen. Please file a bug if it does.");
+        };
+        Self::reattach_arm_interface(interface, debug_sequence)?;
+        for core_state in &self.cores {
+            core_state.enable_arm_debug(interface.deref_mut())?;
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all)]
     fn reattach_arm_interface(
         interface: &mut Box<dyn ArmProbeInterface>,

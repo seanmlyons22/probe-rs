@@ -6,9 +6,11 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use colored::*;
 use parking_lot::FairMutex;
+use probe_rs::architecture::arm::ArmError;
 use probe_rs::gdb_server::GdbInstanceConfiguration;
 use probe_rs::probe::list::Lister;
 use probe_rs::rtt::ScanRegion;
+use probe_rs::Error;
 use probe_rs::{probe::DebugProbeSelector, Session};
 use probe_rs_target::MemoryRegion;
 use std::ffi::OsString;
@@ -269,9 +271,19 @@ fn main_try(mut args: Vec<OsString>, offset: UtcOffset) -> Result<()> {
                 "     {} The 'flashing.halt_afterwards' option in the config has moved to the 'reset' section",
                 "Warning".yellow().bold()
             ));
-            core.reset_and_halt(halt_timeout)?;
+            if let Err(Error::Arm(ArmError::ReAttachRequired)) = core.reset_and_halt(halt_timeout) {
+                drop(core);
+                session.reattach()?;
+                core = session.core(0)?;
+                core.halt(halt_timeout)?;
+            }
         } else if config.reset.halt_afterwards {
-            core.reset_and_halt(halt_timeout)?;
+            if let Err(Error::Arm(ArmError::ReAttachRequired)) = core.reset_and_halt(halt_timeout) {
+                drop(core);
+                session.reattach()?;
+                core = session.core(0)?;
+                core.halt(halt_timeout)?;
+            }
         } else {
             core.reset()?;
         }

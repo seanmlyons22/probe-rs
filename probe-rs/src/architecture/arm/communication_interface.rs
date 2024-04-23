@@ -89,7 +89,7 @@ pub trait ArmProbeInterface: DapAccess + SwdSequence + SwoAccess + Send {
     /// Returns the number of access ports the debug port has.
     ///
     /// If the target device has multiple debug ports, this will switch the active debug port
-    /// if necessary. This will also  
+    /// if necessary. This will also
     fn num_access_ports(&mut self, dp: DpAddress) -> Result<usize, ArmError>;
 
     /// Reads the chip info from the romtable of given debug port.

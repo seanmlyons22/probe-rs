@@ -2,9 +2,11 @@ use probe_rs_target::{MemoryRegion, RamRegion, RawFlashAlgorithm};
 use tracing::Level;
 
 use super::{FlashAlgorithm, FlashBuilder, FlashError, FlashFill, FlashPage, FlashProgress};
+use crate::architecture::arm::ArmError;
 use crate::config::NvmRegion;
 use crate::flashing::encoder::FlashEncoder;
 use crate::memory::MemoryInterface;
+use crate::Error;
 use crate::{core::CoreRegisters, session::Session, Core, InstructionSet};
 use std::{
     fmt::Debug,
@@ -163,8 +165,15 @@ impl<'session> Flasher<'session> {
             .map_err(FlashError::Core)?;
         tracing::debug!("PC = 0x{:08x}", cpu_info.pc);
         tracing::debug!("Reset and halt");
-        core.reset_and_halt(Duration::from_millis(500))
-            .map_err(FlashError::Core)?;
+        let reset_result = core.reset_and_halt(Duration::from_millis(500));
+        if let Err(Error::Arm(ArmError::ReAttachRequired)) = reset_result {
+            drop(core);
+            self.session.reattach()?;
+            core = self.session.core(self.core_index)?;
+        } else {
+            //return Err(FlashError::Core);
+            todo!();
+        }
 
         // TODO: Possible special preparation of the target such as enabling faster clocks for the flash e.g.
 
