@@ -474,7 +474,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         // Assume that multidrop means SWD version 2 and dormant state.
         // There could also be chips with SWD version 2 that don't use multidrop,
         // so this will have to be changed in the future.
-        let has_dormant = matches!(dp, DpAddress::Multidrop(_));
+        let has_dormant = true; // TODO! Hacking for CC2340R5
 
         fn alert_sequence(interface: &mut dyn DapProbe) -> Result<(), ArmError> {
             tracing::trace!("Sending Selection Alert sequence");
