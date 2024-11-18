@@ -409,12 +409,15 @@ impl Session {
         let probes = lister.list_all();
 
         // Use the first probe found.
-        let probe = probes
+        let mut probe = probes
             .first()
             .ok_or(Error::Probe(DebugProbeError::ProbeCouldNotBeCreated(
                 ProbeCreationError::NotFound,
             )))?
             .open()?;
+
+        // TODO: HACK for CC2340R5
+        probe.select_protocol(crate::probe::WireProtocol::Swd)?;
 
         // Attach to a chip.
         probe.attach(target, permissions)

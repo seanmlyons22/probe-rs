@@ -751,6 +751,9 @@ impl CmsisDap {
             return Ok(());
         }
 
+        // TODO: HACK for CC2340R5
+        self.protocol = Some(WireProtocol::Swd);
+
         let protocol: ConnectRequest = if let Some(protocol) = self.protocol {
             match protocol {
                 WireProtocol::Swd => ConnectRequest::Swd,
