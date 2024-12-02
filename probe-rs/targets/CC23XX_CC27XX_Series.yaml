@@ -27,8 +27,8 @@ variants:
     - main
   - !Nvm
     range:
-      start: 0x000000004e020000
-      end: 0x000000004e020800
+      start: 0x4e020000
+      end: 0x4e020800
     cores:
     - main
     access:
