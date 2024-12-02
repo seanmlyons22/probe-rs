@@ -4,7 +4,10 @@ use probe_rs_target::Chip;
 
 use crate::{
     config::DebugSequence,
-    vendor::{ti::sequences::{cc13xx_cc26xx::CC13xxCC26xx, cc23xx_cc27xx::CC23xxCC27xx}, Vendor},
+    vendor::{
+        ti::sequences::{cc13xx_cc26xx::CC13xxCC26xx, cc23xx_cc27xx::CC23xxCC27xx},
+        Vendor,
+    },
 };
 
 pub mod sequences;

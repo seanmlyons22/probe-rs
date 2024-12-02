@@ -1,8 +1,8 @@
 //! Sequences for cc23xx_cc27xx devices
+use bitfield::bitfield;
 use std::ops::DerefMut;
-use std::sync::Arc;
-use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::architecture::arm::ap::AccessPortType;
@@ -31,39 +31,174 @@ pub struct CC23xxCC27xx {
     _name: String,
 }
 
+/// Enum representing the Access Port Select register values
+#[derive(Debug, Clone, Copy)]
+enum ApSel {
+    /// Config-AP: This is the AP used to read device type information
+    CfgAp = 1,
+    /// Sec-AP: This is the AP used to send SACI commands
+    SecAp = 2,
+}
+
+
+
+bitfield! {
+    /// Device Status Register, part of CFG-AP.
+    ///
+    /// This register is used to read the device status and boot status.
+    #[derive(Copy, Clone)]
+    pub struct DeviceStatusRegister(u32);
+    impl Debug;
+    ///  Bit describing if the AHB-AP is available
+    ///
+    /// `0`: Device is in SACI mode\
+    /// `1`: Device is not in SACI mode and AHB-AP is available
+    pub ahb_ap_available, _: 24;
+
+    /// Boot Status
+    ///
+    /// This field is used to read the boot status of the device.
+    pub u8, boot_status, _: 15, 8;
+}
+
+impl DeviceStatusRegister {
+    /// Address of the device status register within the CFG-AP.
+    pub const DEVICE_STATUS_REGISTER_ADDRESS: u8 = 0x0C;
+
+    /// Read the device status register from the CFG-AP.
+    pub fn read(interface: &mut ArmCommunicationInterface<Initialized>) -> Result<Self, ArmError> {
+        let cfg_ap: FullyQualifiedApAddress = ApSel::CfgAp.into();
+        let contents =
+            interface.read_raw_ap_register(&cfg_ap, Self::DEVICE_STATUS_REGISTER_ADDRESS)?;
+        Ok(Self(contents))
+    }
+}
+
+const BOOT_STATUS_APP_WAITLOOP_DBGPROBE: u8 = 0xC1;
+const BOOT_STATUS_BLDR_WAITLOOP_DBGPROBE: u8 = 0x81;
+const BOOT_STATUS_BOOT_WAITLOOP_DBGPROBE: u8 = 0x38;
+
+bitfield! {
+    /// TX_CTRL Register, part of SEC-AP.
+    ///
+    /// This register is used to control the transmission of SACI commands.
+    #[derive(Copy, Clone)]
+    pub struct TxCtrlRegister(u32);
+    impl Debug;
+    /// Bit indicating if the TXD register is ready.
+    ///
+    /// Indicates that TXD can be read. Set by hardware when TXD is written, cleared by hardware when TXD is read
+    ///
+    /// `0`: TXD is ready
+    /// `1`: TXD is not ready
+    pub txd_full, _: 0;
+    /// Command Start
+    ///
+    /// This field is used to start a command.
+    pub cmd_start, set_cmd_start: 1;
+}
+
+impl TxCtrlRegister {
+    /// Address of the TX_CTRL register within the SEC-AP.
+    pub const TX_CTRL_REGISTER_ADDRESS: u8 = 4;
+
+    /// Read the TX_CTRL register from the SEC-AP.
+    pub fn read(interface: &mut dyn ArmProbeInterface) -> Result<Self, ArmError> {
+        let sec_ap: FullyQualifiedApAddress = ApSel::SecAp.into();
+        let contents = interface.read_raw_ap_register(&sec_ap, Self::TX_CTRL_REGISTER_ADDRESS)?;
+        Ok(Self(contents))
+    }
+
+    /// Write the TX_CTRL register to the SEC-AP.
+    pub fn write(&self, interface: &mut dyn ArmProbeInterface) -> Result<(), ArmError> {
+        let sec_ap: FullyQualifiedApAddress = ApSel::SecAp.into();
+        interface.write_raw_ap_register(&sec_ap, Self::TX_CTRL_REGISTER_ADDRESS, self.0)
+    }
+}
+
+
+impl From<ApSel> for FullyQualifiedApAddress {
+    fn from(apsel: ApSel) -> Self {
+        FullyQualifiedApAddress::v1_with_default_dp(apsel as u8)
+    }
+}
+
 impl CC23xxCC27xx {
-    /// Create the sequencer for the cc13xx_cc26xx family of parts.
+    /// Create the sequencer for the cc23xx_cc27xx family of parts.
     pub fn create(name: String) -> Arc<Self> {
         Arc::new(Self { _name: name })
     }
+
+    /// Polls the TX_CTRL register until it is ready or a timeout occurs.
+    ///
+    /// This function reads the TX_CTRL register in a loop until it indicates readiness
+    /// or the specified timeout duration has elapsed.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - A mutable reference to the ARM communication interface.
+    /// * `timeout` - The maximum duration to wait for the TX_CTRL register to be ready.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), ArmError>` - Returns `Ok(())` if the TX_CTRL register is ready,
+    ///   or an `ArmError` if there was a timeout.
+    fn poll_tx_ctrl(
+        &self,
+        interface: &mut dyn ArmProbeInterface,
+        timeout: Duration,
+    ) -> Result<(), ArmError> {
+        let start = Instant::now();
+        let mut tx_ctrl = TxCtrlRegister::read(interface)?;
+        TxCtrlRegister::read(interface)?;
+        while tx_ctrl.txd_full() {
+            if start.elapsed() >= timeout {
+                return Err(ArmError::Timeout);
+            }
+            tx_ctrl = TxCtrlRegister::read(interface)?;
+        }
+        Ok(())
+    }
+
+    /// Sends a SACI command to the device.
+    ///
+    /// This function communicates with the device using the Security Access Port (SEC AP)
+    /// to send a SACI command. It waits for the TX_CTRL register to be ready before sending
+    /// the command and then writes the command to the TX_DATA register. Again waiting for TX_CTRL to be ready.
+    ///
+    /// Implements Section 8.3.1.1 from https://www.ti.com/lit/ug/swcu193/swcu193.pdf
+    ///
+    /// # Arguments
+    ///
+    /// * `interface` - A mutable reference to the ARM communication interface.
+    /// * `command` - The SACI command to be sent.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), ArmError>` - Returns `Ok(())` if the command was successfully sent,
+    ///   or an `ArmError` if there was an error during communication.
+    ///
     fn saci_command(
         &self,
-        interface: &mut ArmCommunicationInterface<Initialized>,
+        interface: &mut dyn ArmProbeInterface,
         command: u32,
     ) -> Result<(), ArmError> {
-        let sec_ap = &FullyQualifiedApAddress::v1_with_default_dp(2);
+        let sec_ap: FullyQualifiedApAddress = ApSel::SecAp.into();
 
         const TX_DATA_ADDR: u8 = 0;
-        const TX_CTRL_ADDR: u8 = 4;
 
-        let mut tx_ctrl = interface.read_raw_ap_register(sec_ap, TX_CTRL_ADDR)?;
-
-        // Wait for tx_ctrl to be ready
-        while (tx_ctrl & 0x00000001) != 0 {
-            tx_ctrl = interface.read_raw_ap_register(sec_ap, TX_CTRL_ADDR)?;
-        }
+        // Wait for tx_ctrl to be ready with a timeout of 1 millisecond
+        self.poll_tx_ctrl(interface, Duration::from_millis(1))?;
 
         // Set Cmd Start
-        interface.write_raw_ap_register(sec_ap, TX_CTRL_ADDR, 0x02)?;
+        let mut tx_ctrl = TxCtrlRegister(0);
+        tx_ctrl.set_cmd_start(true);
+        TxCtrlRegister::write(&tx_ctrl, interface)?;
 
         // Write parameter word to txd
-        interface.write_raw_ap_register(sec_ap, TX_DATA_ADDR, command)?;
+        interface.write_raw_ap_register(&sec_ap, TX_DATA_ADDR, command)?;
 
-        // Wait for tx_ctrl to be ready
-        tx_ctrl = interface.read_raw_ap_register(sec_ap, TX_CTRL_ADDR)?;
-        while (tx_ctrl & 0x00000001) != 0 {
-            tx_ctrl = interface.read_raw_ap_register(sec_ap, TX_CTRL_ADDR)?;
-        }
+        self.poll_tx_ctrl(interface, Duration::from_millis(1))?;
 
         Ok(())
     }
@@ -164,29 +299,27 @@ impl ArmDebugSequence for CC23xxCC27xx {
         // This code is unique to the cc23xx_cc27xx family
         // First connect to the config AP to read the device status register
         // This will tell us the state of the boot rom and if SACI is enabled
-        let cfg_ap = &FullyQualifiedApAddress::v1_with_default_dp(1);
 
-        let mut device_status = interface.read_raw_ap_register(cfg_ap, 0x0C).unwrap();
+        // Read the device status register
+        let mut device_status = DeviceStatusRegister::read(interface)?;
 
-        // Check if bit 24 of the device status register is cleared
-        // If it is, we need to exit SACI to enable the AHB-AP to be accessed
-        if device_status & (1 << 24) == 0 {
+        // AHB-AP is not accessible when in SACI mode, so exit SACI
+        if !device_status.ahb_ap_available() {
             // Send the SACI command to exit SACI
             self.saci_command(interface, 0x07)?;
 
             // Read the device status register again to check if boot is completed
-            device_status = interface.read_raw_ap_register(cfg_ap, 0x0C).unwrap();
-
-            // Boot status tells us the state of the boot rom
-            let boot_status = (device_status >> 8) & 0xFF;
+            device_status = DeviceStatusRegister::read(interface)?;
 
             // Check if the boot rom is waiting for a debugger to attach
-            match boot_status {
-                0x38 | 0x81 | 0xC1 => {
+            match device_status.boot_status() {
+                BOOT_STATUS_BOOT_WAITLOOP_DBGPROBE
+                | BOOT_STATUS_BLDR_WAITLOOP_DBGPROBE
+                | BOOT_STATUS_APP_WAITLOOP_DBGPROBE => {
                     tracing::info!("BOOT_WAITLOOP_DBGPROBE");
                     BOOT_LOOP.store(true, Ordering::SeqCst);
                 }
-                _ => tracing::info!("Not waiting on boot status"),
+                _ => tracing::warn!("Expected device to be waiting on debugger, but it is not"),
             }
         }
 
@@ -203,16 +336,19 @@ impl ArmDebugSequence for CC23xxCC27xx {
     ) -> Result<(), ArmError> {
         if is_in_boot_loop() {
             // Step 1: Halt the CPU
-            let mut value = Dhcsr(0);
-            value.set_c_halt(true);
-            value.set_c_debugen(true);
-            value.enable_write();
+            let mut dhcsr = Dhcsr(0);
+            dhcsr.set_c_halt(true);
+            dhcsr.set_c_debugen(true);
+            dhcsr.enable_write();
 
-            let mut memory =
-                interface.memory_interface(&FullyQualifiedApAddress::v1_with_default_dp(0))?;
-            memory.write_word_32(Dhcsr::get_mmio_address(), value.into())?;
-            // Step 1.1: Wait for CPU to halt. TODO, this can be better/more efficient
-            thread::sleep(Duration::from_millis(1));
+            let mut memory = interface.memory_interface(core_ap)?;
+            memory.write_word_32(Dhcsr::get_mmio_address(), dhcsr.into())?;
+
+            // Step 1.1: Wait for the CPU to halt
+            dhcsr = Dhcsr(memory.read_word_32(Dhcsr::get_mmio_address())?);
+            while !dhcsr.s_halt() {
+                dhcsr = Dhcsr(memory.read_word_32(Dhcsr::get_mmio_address())?);
+            }
 
             // Step 2: Write R3 to 0 to exit the boot loop
             cortex_m::write_core_reg(memory.deref_mut(), crate::RegisterId(3), 0x00000000)?;
