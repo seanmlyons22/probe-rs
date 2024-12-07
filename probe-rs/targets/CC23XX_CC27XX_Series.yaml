@@ -14,7 +14,7 @@ variants:
   - !Nvm
     range:
       start: 0x0
-      end: 0x5800
+      end: 0x80000
     cores:
     - main
     access:
