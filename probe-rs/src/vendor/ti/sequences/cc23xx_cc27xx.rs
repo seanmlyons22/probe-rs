@@ -3,10 +3,11 @@ use bitfield::bitfield;
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::architecture::arm::ap::AccessPortType;
-use crate::architecture::arm::armv6m::{Aircr, Demcr, Dhcsr};
+use crate::architecture::arm::armv6m::{Aircr, BpCtrl, Demcr, Dhcsr};
 use crate::architecture::arm::communication_interface::{ArmCommunicationInterface, Initialized};
 use crate::architecture::arm::core::cortex_m;
 use crate::architecture::arm::dp::{Abort, Ctrl, DebugPortError, DpAccess, Select};
@@ -39,8 +40,6 @@ enum ApSel {
     /// Sec-AP: This is the AP used to send SACI commands
     SecAp = 2,
 }
-
-
 
 bitfield! {
     /// Device Status Register, part of CFG-AP.
@@ -115,7 +114,6 @@ impl TxCtrlRegister {
         interface.write_raw_ap_register(&sec_ap, Self::TX_CTRL_REGISTER_ADDRESS, self.0)
     }
 }
-
 
 impl From<ApSel> for FullyQualifiedApAddress {
     fn from(apsel: ApSel) -> Self {
@@ -214,15 +212,22 @@ impl ArmDebugSequence for CC23xxCC27xx {
         // Check if the previous code requested a halt before reset
         let demcr = Demcr(probe.read_word_32(Demcr::get_mmio_address())?);
 
+        // Read if breakpoints should be enabled after reset
+        let mut bpt_ctrl = BpCtrl(probe.read_word_32(BpCtrl::get_mmio_address())?);
+
         let mut aircr = Aircr(0);
         aircr.vectkey();
         aircr.set_sysresetreq(true);
 
+        // Reset the device, flush all pending writes and wait on the reset to complete
         probe.write_word_32(Aircr::get_mmio_address(), aircr.into())?;
+        probe.flush().ok();
+        thread::sleep(Duration::from_millis(10));
 
         // Re-initializing the core(s) is on us.
         let ap = probe.ap().ap_address().clone();
         let interface = probe.get_arm_communication_interface()?;
+
         interface.reinitialize()?;
         self.debug_core_start(interface, &ap, core_type, debug_base, None)?;
 
@@ -235,6 +240,10 @@ impl ArmDebugSequence for CC23xxCC27xx {
 
             probe.write_word_32(Dhcsr::get_mmio_address(), value.into())?;
         }
+
+        // Restore the breakpoint control register
+        bpt_ctrl.set_key(true);
+        probe.write_word_32(BpCtrl::get_mmio_address(), bpt_ctrl.into())?;
 
         Ok(())
     }
